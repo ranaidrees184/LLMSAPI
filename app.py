@@ -10,7 +10,6 @@ class Gender(str, Enum):
     female = "Female"
 
 app = FastAPI(title="Biomarker Health API", version="1.0")
-
 client = Client("Muhammadidrees/MoizMedgemma27b")
 
 class BiomarkerInput(BaseModel):
@@ -28,25 +27,26 @@ class BiomarkerInput(BaseModel):
     height: float = Field(..., example=123, description="cm")
     weight: float = Field(..., example=60, description="kg")
 
+
 def parse_result_to_json(result_text: str):
     """
-    Converts LLM markdown output into structured JSON
+    Converts LLM markdown output into structured JSON with robust parsing
     """
     data = {
         "normal_ranges": {},
         "biomarker_table": [],
         "executive_summary": {"top_priorities": [], "key_strengths": []},
-        "system_analysis": "",
+        "system_analysis": {"status": "", "explanation": ""},
         "action_plan": {"nutrition": "", "lifestyle": "", "medical": "", "testing": ""},
         "interaction_alerts": []
     }
 
-    # Extract normal ranges
+    # ---------------- Normal Ranges ----------------
     normal_ranges = re.findall(r"- ([A-Za-z ]+): ([0-9.\-–]+.*)", result_text)
     for biomarker, value in normal_ranges:
         data["normal_ranges"][biomarker.strip()] = value.strip()
 
-    # Extract biomarker table
+    # ---------------- Biomarker Table ----------------
     table_match = re.search(r"\| Biomarker \| Value \|.*?\|\n((?:\|.*\|\n)+)", result_text, re.S)
     if table_match:
         rows = table_match.group(1).strip().split("\n")
@@ -57,16 +57,21 @@ def parse_result_to_json(result_text: str):
                     "biomarker": parts[0],
                     "value": parts[1],
                     "status": parts[2],
-                    "insight": parts[3],
+                    "insight": parts[3]
                 })
 
-    # Executive summary (priorities + strengths)
-    priorities = re.findall(r"\d+\.\s+(.*)", result_text)
-    data["executive_summary"]["top_priorities"] = priorities[:3]
-    strengths = re.findall(r"- Normal (.*)", result_text)
-    data["executive_summary"]["key_strengths"] = strengths
+    # ---------------- Executive Summary ----------------
+    exec_section = re.search(r"Executive Summary\n(.*?)\nSystem-Specific Analysis", result_text, re.S)
+    if exec_section:
+        exec_text = exec_section.group(1)
+        # Top priorities: lines starting with number + .
+        priorities = re.findall(r"\d+\.\s+(.*)", exec_text)
+        data["executive_summary"]["top_priorities"] = priorities if priorities else []
+        # Key strengths: lines starting with '-' and containing 'Normal' or 'within'
+        strengths = re.findall(r"- (.*(?:Normal|within|good|optimal).*?)\n", exec_text)
+        data["executive_summary"]["key_strengths"] = strengths if strengths else []
 
-    # System analysis
+    # ---------------- System Analysis ----------------
     sys_match = re.search(r"System-Specific Analysis\n- Status: (.*?)\n- Explanation: (.*?)\n", result_text, re.S)
     if sys_match:
         data["system_analysis"] = {
@@ -74,23 +79,36 @@ def parse_result_to_json(result_text: str):
             "explanation": sys_match.group(2).strip()
         }
 
-    # Action plan
-    plan_matches = re.findall(r"- (\w+): (.*)", result_text)
-    for category, content in plan_matches:
-        key = category.lower()
-        if key in data["action_plan"]:
-            data["action_plan"][key] = content.strip()
+    # ---------------- Action Plan ----------------
+    action_section = re.search(r"Personalized Action Plan\n(.*?)\nInteraction Alerts", result_text, re.S)
+    if action_section:
+        plan_matches = re.findall(r"- (\w+): (.*)", action_section.group(1))
+        for category, content in plan_matches:
+            key = category.lower()
+            if key in data["action_plan"]:
+                data["action_plan"][key] = content.strip()
 
-    # Interaction alerts
-    interactions = re.findall(r"- (The .*?)\n", result_text)
-    data["interaction_alerts"] = interactions
+    # ---------------- Interaction Alerts ----------------
+    alert_section = re.search(r"Interaction Alerts\n(.*)", result_text, re.S)
+    if alert_section:
+        alerts = [line.strip("- ").strip() for line in alert_section.group(1).split("\n") if line.strip()]
+        data["interaction_alerts"] = alerts
+
+    # Ensure lists are never None
+    if data["executive_summary"]["top_priorities"] is None:
+        data["executive_summary"]["top_priorities"] = []
+    if data["executive_summary"]["key_strengths"] is None:
+        data["executive_summary"]["key_strengths"] = []
+    if data["interaction_alerts"] is None:
+        data["interaction_alerts"] = []
 
     return data
+
 
 @app.post("/analyze")
 async def analyze_biomarkers(data: BiomarkerInput):
     try:
-        # Step 1: Get LLM result
+        # ---------------- Call LLM ----------------
         result = client.predict(
             albumin=data.albumin,
             creatinine=data.creatinine,
@@ -108,7 +126,7 @@ async def analyze_biomarkers(data: BiomarkerInput):
             api_name="/respond"
         )
 
-        # Step 2: Parse markdown into JSON
+        # ---------------- Parse Markdown into JSON ----------------
         parsed = parse_result_to_json(result)
 
         return parsed
